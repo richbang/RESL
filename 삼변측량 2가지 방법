@@ -1,0 +1,64 @@
+//삼변측량
+/*
+# Anchor node locations
+# anchor = #4 #3 #2
+anchor_x = [0, 3280, 3280]
+anchor_y = [3070, 3070, 0]
+anchor = list(zip(anchor_x, anchor_y))
+
+def trilaterate(anchor_x, anchor_y, anchor1, anchor2, anchor3) :
+    """
+    @brief : Trilaterate Tag location
+    @param : anchor_x - List of anchor coordinates along the X - axis
+    anchor_y - List of anchor coordinates along the Y - axis
+    anchor1 - Distance to the 1st Anchor
+    anchor2 - Distance to the 2nd Anchor
+    anchor3 - Distance to the 3rd Anchor
+    @ret : tag_coordinates - Tag Coordinates in a numpy array.
+    """
+    r1_sq = pow(anchor1, 2)
+    r2_sq = pow(anchor2, 2)
+    r3_sq = pow(anchor3, 2)
+
+    # Solve a linear matrix equation where x, y is the Tag coordinate :
+# Ax + By = C
+# Dx + Ey = F
+A = (-2 * anchor_x[0]) + (2 * anchor_x[1])
+B = (-2 * anchor_y[0]) + (2 * anchor_y[1])
+C = r1_sq - r2_sq - pow(anchor_x[0], 2) + pow(anchor_x[1], 2) - pow(anchor_y[0], 2) + pow(anchor_y[1], 2)
+D = (-2 * anchor_x[1]) + (2 * anchor_x[2])
+E = (-2 * anchor_y[1]) + (2 * anchor_y[2])
+F = r2_sq - r3_sq - pow(anchor_x[1], 2) + pow(anchor_x[2], 2) - pow(anchor_y[1], 2) + pow(anchor_y[2], 2)
+
+a = np.array([[A, B], [D, E]] )
+b = np.array([C, F])
+tag_coordinates = np.linalg.solve(a, b)
+# print("Tag Coordinate:", tag_coordinates)
+return
+*/
+/*
+class AP:
+    def __init__(self, x, y, distance):
+        self.x = x
+        self.y = y
+        self.distance = distance
+
+class Trilateration:
+    def __init__(self, AP1, AP2, AP3):
+        self.AP1 = AP1
+        self.AP2 = AP2
+        self.AP3 = AP3
+
+    def calcUserLocation(self):
+        A = 2 * (self.AP2.x - self.AP1.x)
+        B = 2 * (self.AP2.y - self.AP1.y)
+        C = self.AP1.distance**2 - self.AP2.distance**2 - self.AP1.x**2 + self.AP2.x**2 - self.AP1.y**2 + self.AP2.y**2
+        D = 2 * (self.AP3.x - self.AP2.x)
+        E = 2 * (self.AP3.y - self.AP2.y)
+        F = self.AP2.distance**2 - self.AP3.distance**2 - self.AP2.x**2 + self.AP3.x**2 - self.AP2.y**2 + self.AP3.y**2
+
+        user_x = ( (F * B) - (E * C) ) / ( (B * D) - (E * A))
+        user_y = ( (F * A) - (D * C) ) / ( (A * E) - (D * B))
+        return user_x, user_y
+
+*/
