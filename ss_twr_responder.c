@@ -1,328 +1,613 @@
-/*! ----------------------------------------------------------------------------
- *  @file    ss_twr_responder.c
- *  @brief   Single-sided two-way ranging (SS TWR) responder example code
+
+/**
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * This notice applies to any and all portions of this file
+ * that are not between comment pairs USER CODE BEGIN and
+ * USER CODE END. Other portions of this file, whether
+ * inserted by the user or by software development tools
+ * are owned by their respective copyright owners.
  *
- *           This is a simple code example which acts as the responder in a SS TWR distance measurement exchange. This application waits for a "poll"
- *           message (recording the RX time-stamp of the poll) expected from the "SS TWR initiator" example code (companion to this application), and
- *           then sends a "response" message to complete the exchange. The response message contains all the time-stamps recorded by this application,
- *           including the calculated/predicted TX time-stamp for the response message itself. The companion "SS TWR initiator" example application
- *           works out the time-of-flight over-the-air and, thus, the estimated distance between the two devices.
- *
- * @attention
- *
- * Copyright 2015 - 2021 (c) Decawave Ltd, Dublin, Ireland.
- *
+ * Copyright (c) 2019 STMicroelectronics International N.V.
  * All rights reserved.
  *
- * @author Decawave
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted, provided that the following conditions are met:
+ *
+ * 1. Redistribution of source code must retain the above copyright notice,
+ *    this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ * 3. Neither the name of STMicroelectronics nor the names of other
+ *    contributors to this software may be used to endorse or promote products
+ *    derived from this software without specific written permission.
+ * 4. This software, including modifications and/or derivative works of this
+ *    software, must execute solely and exclusively on microcontroller or
+ *    microprocessor devices manufactured by or for STMicroelectronics.
+ * 5. Redistribution and use of this software other than as permitted under
+ *    this license is void and will automatically terminate your rights under
+ *    this license.
+ *
+ * THIS SOFTWARE IS PROVIDED BY STMICROELECTRONICS AND CONTRIBUTORS "AS IS"
+ * AND ANY EXPRESS, IMPLIED OR STATUTORY WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+ * PARTICULAR PURPOSE AND NON-INFRINGEMENT OF THIRD PARTY INTELLECTUAL PROPERTY
+ * RIGHTS ARE DISCLAIMED TO THE FULLEST EXTENT PERMITTED BY LAW. IN NO EVENT
+ * SHALL STMICROELECTRONICS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA,
+ * OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+ * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
+ * EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ ******************************************************************************
  */
-#include "deca_probe_interface.h"
-#include <deca_device_api.h>
-#include <deca_spi.h>
-#include <example_selection.h>
+/* Includes ------------------------------------------------------------------*/
+#include "examples_defines.h"
+#include <main.h>
 #include <port.h>
-#include <shared_defines.h>
-#include <shared_functions.h>
+#include <stm32f4xx_hal.h>
+#include <usb_device.h>
 
-#if defined(TEST_SS_TWR_RESPONDER)
+/* USER CODE BEGIN Includes */
 
-extern void test_run_info(unsigned char *data);
+/* USER CODE END Includes */
 
-/* Example application name */
-#define APP_NAME "SS TWR RESP v1.0"
+/* Private variables ---------------------------------------------------------*/
+RNG_HandleTypeDef hrng;
 
-/* Default communication configuration. We use default non-STS DW mode. */
-static dwt_config_t config = {
-    5,                /* Channel number. */
-    DWT_PLEN_128,     /* Preamble length. Used in TX only. */
-    DWT_PAC8,         /* Preamble acquisition chunk size. Used in RX only. */
-    9,                /* TX preamble code. Used in TX only. */
-    9,                /* RX preamble code. Used in RX only. */
-    1,                /* 0 to use standard 8 symbol SFD, 1 to use non-standard 8 symbol, 2 for non-standard 16 symbol SFD and 3 for 4z 8 symbol SDF type */
-    DWT_BR_6M8,       /* Data rate. */
-    DWT_PHRMODE_STD,  /* PHY header mode. */
-    DWT_PHRRATE_STD,  /* PHY header rate. */
-    (129 + 8 - 8),    /* SFD timeout (preamble length + 1 + SFD length - PAC size). Used in RX only. */
-    DWT_STS_MODE_OFF, /* STS disabled */
-    DWT_STS_LEN_64,   /* STS length see allowed values in Enum dwt_sts_lengths_e */
-    DWT_PDOA_M0       /* PDOA mode off */
-};
+SPI_HandleTypeDef   hspi1;
+SPI_HandleTypeDef   hspi4;
+SPI_HandleTypeDef   *hcurrent_active_spi=&hspi1;//Is the current active SPI pointer - 1 or 2
+uint16_t            pin_io_active_spi=DW_NSS_Pin;//CS IO for SPI. Default SPI1
+GPIO_PinState       SPI_CS_state=GPIO_PIN_RESET;//Determine the CS for the IO
+host_using_spi_e    host_spi = SPI_1;
 
-/* Default antenna delay values for 64 MHz PRF. See NOTE 2 below. */
-#define TX_ANT_DLY 16385
-#define RX_ANT_DLY 16385
+TIM_HandleTypeDef htim1;
 
-/* Frames used in the ranging process. See NOTE 3 below. */
-static uint8_t rx_poll_msg[] = { 0x41, 0x88, 0, 0xCA, 0xDE, 'W', 'A', 'V', 'E', 0xE0, 0, 0 };
-static uint8_t tx_resp_msg[] = { 0x41, 0x88, 0, 0xCA, 0xDE, 'V', 'E', 'W', 'A', 0xE1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-/* Length of the common part of the message (up to and including the function code, see NOTE 3 below). */
-#define ALL_MSG_COMMON_LEN 10
-/* Index to access some of the fields in the frames involved in the process. */
-#define ALL_MSG_SN_IDX          2
-#define RESP_MSG_POLL_RX_TS_IDX 10
-#define RESP_MSG_RESP_TX_TS_IDX 14
-#define RESP_MSG_TS_LEN         4
-/* Frame sequence number, incremented after each transmission. */
-static uint8_t frame_seq_nb = 0;
+UART_HandleTypeDef huart3;
+DMA_HandleTypeDef hdma_usart3_rx;
+DMA_HandleTypeDef hdma_usart3_tx;
 
-/* Buffer to store received messages.
- * Its size is adjusted to longest frame that this example code is supposed to handle. */
-#define RX_BUF_LEN 12 // Must be less than FRAME_LEN_MAX_EX
-static uint8_t rx_buffer[RX_BUF_LEN];
-static uint8_t buff[16] = {0, };
-static uint8_t anchor1[16] = {'A','1',':',0,0,0,0,0,0,0,0,0,0,0,0, 10};
-static uint8_t anchor2[16] = {'A','2',':',0,0,0,0,0,0,0,0,0,0,0,0, 10};
-static uint8_t anchor3[16] = {'A','2',':',0,0,0,0,0,0,0,0,0,0,0,0, 10};
-static uint8_t (*anchor_identifier)[16];
-/* Hold copy of status register state here for reference so that it can be examined at a debug breakpoint. */
-static uint32_t status_reg = 0;
+/* USER CODE BEGIN PV */
+/* Private variables ---------------------------------------------------------*/
+#define UNIT_TEST 0
+#define WAIT_FOR_USB_CDC 0
+/* USER CODE END PV */
 
-/* Delay between frames, in UWB microseconds. See NOTE 1 below. */
-#define POLL_RX_TO_RESP_TX_DLY_UUS 650
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
+static void MX_TIM1_Init(void);
+static void MX_USART3_UART_Init(void);
+static void MX_SPI_Init(SPI_HandleTypeDef  *spi_hn);
+static void MX_RNG_Init(void);
+static void MX_NVIC_Init(void);
+static void MX_INIT_2_SPIs(void);
 
-/* Timestamps of frames transmission/reception. */
-static uint64_t poll_rx_ts;
-static uint64_t resp_tx_ts;
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
-/* Values for the PG_DELAY and TX_POWER registers reflect the bandwidth and power of the spectrum at the current
- * temperature. These values can be calibrated prior to taking reference measurements. See NOTE 5 below. */
-extern dwt_txconfig_t txconfig_options;
+extern example_ptr example_pointer;
+
+extern int unit_test_main(void);
+extern uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len);
 
 /*! ------------------------------------------------------------------------------------------------------------------
- * @fn main()
+ * @fn test_run_info()
  *
- * @brief Application entry point.
+ * @brief  This gets run info from a test and sends it through virtual COM port.
  *
- * @param  none
+ * @param data - Message data, this data should be NULL string.
  *
- * @return none
+ * output parameters
+ *
+ * no return value
  */
-int ss_twr_responder(void)
+void test_run_info(unsigned char *data)
 {
-    /* Display application name on LCD. */
-    test_run_info((unsigned char *)APP_NAME);
+    uint16_t data_length;
 
-    /* Configure SPI rate, DW3000 supports up to 36 MHz */
-    port_set_dw_ic_spi_fastrate();
+    data_length = strlen((const char *)data);
+    CDC_Transmit_FS(data, data_length); /*Transmit the data through USB - Virtual port*/
+    CDC_Transmit_FS((uint8_t *)"\n\r", 2); /*Transmit end of line through USB - Virtual port*/
+}
 
-    /* Reset and initialize DW chip. */
-    reset_DWIC(); /* Target specific drive of RSTn line into DW3000 low for a period. */
+/* USER CODE BEGIN PFP */
+/* Private function prototypes -----------------------------------------------*/
 
-    Sleep(2); // Time needed for DW3000 to start up (transition from INIT_RC to IDLE_RC, or could wait for SPIRDY event)
+/* USER CODE END PFP */
 
-    /* Probe for the correct device driver. */
-    dwt_probe((struct dwt_probe_s *)&dw3000_probe_interf);
+/* USER CODE BEGIN 0 */
 
-    while (!dwt_checkidlerc()) /* Need to make sure DW IC is in IDLE_RC before proceeding */ { };
-    if (dwt_initialise(DWT_DW_INIT) == DWT_ERROR)
+/* USER CODE END 0 */
+
+/**
+ * @brief  The application entry point.
+ *
+ * @retval None
+ */
+int main(void)
+{
+    /* USER CODE BEGIN 1 */
+
+    /* USER CODE END 1 */
+
+    /* MCU Configuration----------------------------------------------------------*/
+
+    /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+    build_examples();
+    HAL_Init();
+
+    /* USER CODE BEGIN Init */
+
+    /* USER CODE END Init */
+
+    /* Configure the system clock */
+    SystemClock_Config();
+
+    /* USER CODE BEGIN SysInit */
+
+    /* USER CODE END SysInit */
+
+    /* Initialize all configured peripherals */
+    MX_GPIO_Init();
+    MX_DMA_Init();
+    MX_TIM1_Init();
+    MX_USART3_UART_Init();
+    MX_USB_DEVICE_Init();
+
+    MX_RNG_Init();
+    MX_INIT_2_SPIs();
+    /* Initialize interrupts */
+    MX_NVIC_Init();
+    /* USER CODE BEGIN 2 */
+    /* disable IRQ from DW3000*/
+    port_DisableEXT_IRQ();
+
+    /*Sleep to wait for USB CDC to initialise with host*/
+    #ifdef WAIT_FOR_USB_CDC
+    Sleep(5000);
+    #endif
+    /*
+     * DW_RESET_Pin has been configured by CubeMx as Exti0 line
+     * Reconfigure the line as Input
+     */
+    setup_DWICRSTnIRQ(0);
+
+    if (UNIT_TEST)
     {
-        test_run_info((unsigned char *)"INIT FAILED     ");
-        while (1) { };
+        unit_test_main();
     }
-
-    /* Enabling LEDs here for debug so that for each TX the D1 LED will flash on DW3000 red eval-shield boards. */
-    dwt_setleds(DWT_LEDS_ENABLE | DWT_LEDS_INIT_BLINK);
-
-    /* Configure DW IC. See NOTE 13 below. */
-    /* if the dwt_configure returns DWT_ERROR either the PLL or RX calibration has failed the host should reset the device */
-    if (dwt_configure(&config))
+    else
     {
-        test_run_info((unsigned char *)"CONFIG FAILED     ");
-        while (1) { };
+
+        // Run the selected example as selected in example_selection.h
+        example_pointer();
     }
+    /* USER CODE END 2 */
 
-    /* Configure the TX spectrum parameters (power, PG delay and PG count) */
-    dwt_configuretxrf(&txconfig_options);
-
-    /* Apply default antenna delay value. See NOTE 2 below. */
-    dwt_setrxantennadelay(RX_ANT_DLY);
-    dwt_settxantennadelay(TX_ANT_DLY);
-
-    /* Next can enable TX/RX states output on GPIOs 5 and 6 to help debug, and also TX/RX LEDs
-     * Note, in real low power applications the LEDs should not be used. */
-    dwt_setlnapamode(DWT_LNA_ENABLE | DWT_PA_ENABLE);
-
-    /* Loop forever responding to ranging requests. */
+    /* Infinite loop */
+    /* USER CODE BEGIN WHILE */
     while (1)
     {
-        /* Activate reception immediately. */
-        dwt_rxenable(DWT_START_RX_IMMEDIATE);
 
-        /* Poll for reception of a frame or error/timeout. See NOTE 6 below. */
-        waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_ERR), 0);
+        /* USER CODE END WHILE */
 
-        if (status_reg & DWT_INT_RXFCG_BIT_MASK)
-        {
-            uint16_t frame_len;
+        /* USER CODE BEGIN 3 */
+    }
+    /* USER CODE END 3 */
+}
 
-            /* Clear good RX frame event in the DW IC status register. */
-            dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
-
-            /* A frame has been received, read it into the local buffer. */
-            frame_len = dwt_getframelength();
-            if (frame_len <= sizeof(rx_buffer))
-            {
-                dwt_readrxdata(rx_buffer, frame_len, 0);
-
-                /* Check that the frame is a poll sent by "SS TWR initiator" example.
-                 * As the sequence number field of the frame is not relevant, it is cleared to simplify the validation of the frame. */
-                rx_buffer[ALL_MSG_SN_IDX] = 0;
-                if (memcmp(rx_buffer, rx_poll_msg, ALL_MSG_COMMON_LEN) == 0)
-                {
-                    uint32_t resp_tx_time;
-                    int ret;
-
-                    /* Retrieve poll reception timestamp. */
-                    poll_rx_ts = get_rx_timestamp_u64();
-
-                    /* Compute response message transmission time. See NOTE 7 below. */
-                    resp_tx_time = (poll_rx_ts + (POLL_RX_TO_RESP_TX_DLY_UUS * UUS_TO_DWT_TIME)) >> 8;
-                    dwt_setdelayedtrxtime(resp_tx_time);
-
-                    /* Response TX timestamp is the transmission time we programmed plus the antenna delay. */
-                    resp_tx_ts = (((uint64_t)(resp_tx_time & 0xFFFFFFFEUL)) << 8) + TX_ANT_DLY;
-
-                    /* Write all timestamps in the final message. See NOTE 8 below. */
-                    resp_msg_set_ts(&tx_resp_msg[RESP_MSG_POLL_RX_TS_IDX], poll_rx_ts);
-                    resp_msg_set_ts(&tx_resp_msg[RESP_MSG_RESP_TX_TS_IDX], resp_tx_ts);
-
-                    /* Write and send the response message. See NOTE 9 below. */
-                    tx_resp_msg[ALL_MSG_SN_IDX] = frame_seq_nb;
-                    dwt_writetxdata(sizeof(tx_resp_msg), tx_resp_msg, 0); /* Zero offset in TX buffer. */
-                    dwt_writetxfctrl(sizeof(tx_resp_msg), 0, 1);          /* Zero offset in TX buffer, ranging. */
-                    ret = dwt_starttx(DWT_START_TX_DELAYED);
+/**
+  * @brief MX_INIT_2_SPIs Initialization for 2 SPIs
+  * @param None
+  * @retval None
+  */
+void MX_INIT_2_SPIs(void)
+{
+    hspi1.Instance=SPI1;
+    MX_SPI_Init(&hspi1);
+    hspi4.Instance=SPI4;
+    MX_SPI_Init(&hspi4);
+}
 
 
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
 
-                    /* If dwt_starttx() returns an error, abandon this ranging exchange and proceed to the next one. See NOTE 10 below. */
-                    if (ret == DWT_SUCCESS)
-                    {
-                        /* Poll DW IC until TX frame sent event set. See NOTE 6 below. */
-                        waitforsysstatus(NULL, NULL, DWT_INT_TXFRS_BIT_MASK, 0);
+    RCC_OscInitTypeDef RCC_OscInitStruct;
+    RCC_ClkInitTypeDef RCC_ClkInitStruct;
 
-                        /* Clear TXFRS event. */
-                        dwt_writesysstatuslo(DWT_INT_TXFRS_BIT_MASK);
+    /**Configure the main internal regulator output voltage
+     */
+    __HAL_RCC_PWR_CLK_ENABLE();
 
-                        /* Increment frame sequence number after transmission of the poll message (modulo 256). */
-                        frame_seq_nb++;
-                    }
-                    /********************************************************************************************/
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-                    dwt_rxenable(DWT_START_RX_IMMEDIATE);
+    /**Initializes the CPU, AHB and APB busses clocks
+     */
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_BYPASS;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLM = 8;
+    RCC_OscInitStruct.PLL.PLLN = 288;
+    RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+    RCC_OscInitStruct.PLL.PLLQ = 6;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
 
-                    waitforsysstatus(&status_reg, NULL, (DWT_INT_RXFCG_BIT_MASK | SYS_STATUS_ALL_RX_ERR), 0);
+    /**Initializes the CPU, AHB and APB busses clocks
+     */
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-                    if (status_reg & DWT_INT_RXFCG_BIT_MASK)
-                    {
-                        uint16_t frame_len;
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
 
-                        /* Clear good RX frame event in the DW IC status register. */
-                        dwt_writesysstatuslo(DWT_INT_RXFCG_BIT_MASK);
+    /**Configure the Systick interrupt time
+     */
+    HAL_SYSTICK_Config(HAL_RCC_GetHCLKFreq() / 1000);
 
-                        /* A frame has been received, read it into the local buffer. */
-                        frame_len = dwt_getframelength();
+    /**Configure the Systick
+     */
+    HAL_SYSTICK_CLKSourceConfig(SYSTICK_CLKSOURCE_HCLK);
 
-                        if (frame_len <= sizeof(buff))
-                        {
-                            dwt_readrxdata(buff, frame_len, 0);
+    /* SysTick_IRQn interrupt configuration */
+    HAL_NVIC_SetPriority(SysTick_IRQn, 0, 0);
+}
 
-                            if(buff[0]=='7'){
-                            	anchor_identifier = anchor1;
-                            }
-                            else if(buff[0]=='8'){
-                            	anchor_identifier = anchor2;
-                            }
-                            else if(buff[0]=='9'){
-                            	anchor_identifier = anchor3;
-                            }
-                        	memcpy(&(*anchor_identifier)[3],&buff[1],sizeof(char)*frame_len);
-                        	test_run_info((unsigned char*)anchor_identifier);
-                            //test_run_info((unsigned char*)buff);
-                        }
-                    }
-                    /******************************************************************************************************/
-                }
-            }
-        }
-        else
-        {
-            /* Clear RX error events in the DW IC status register. */
-            dwt_writesysstatuslo(SYS_STATUS_ALL_RX_ERR);
-        }
+/**
+ * @brief NVIC Configuration.
+ * @retval None
+ */
+static void MX_NVIC_Init(void)
+{
+    /* USART3_IRQn interrupt configuration */
+    HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
+    /* DMA1_Stream1_IRQn interrupt configuration */
+    HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+    /* DMA1_Stream3_IRQn interrupt configuration */
+    HAL_NVIC_SetPriority(DMA1_Stream3_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(DMA1_Stream3_IRQn);
+    /* ETH_IRQn interrupt configuration */
+    HAL_NVIC_SetPriority(ETH_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(ETH_IRQn);
+    /* TIM1_CC_IRQn interrupt configuration */
+    HAL_NVIC_SetPriority(TIM1_CC_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(TIM1_CC_IRQn);
+}
+
+/* RNG init function */
+static void MX_RNG_Init(void)
+{
+
+    hrng.Instance = RNG;
+    if (HAL_RNG_Init(&hrng) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
     }
 }
-#endif
-/*****************************************************************************************************************************************************
- * NOTES:
- *
- * 1. The single-sided two-way ranging scheme implemented here has to be considered carefully as the accuracy of the distance measured is highly
- *    sensitive to the clock offset error between the devices and the length of the response delay between frames. To achieve the best possible
- *    accuracy, this response delay must be kept as low as possible. In order to do so, 6.8 Mbps data rate is used in this example and the response
- *    delay between frames is defined as low as possible. The user is referred to User Manual for more details about the single-sided two-way ranging
- *    process.
- *
- *    Initiator: |Poll TX| ..... |Resp RX|
- *    Responder: |Poll RX| ..... |Resp TX|
- *                   ^|P RMARKER|                    - time of Poll TX/RX
- *                                   ^|R RMARKER|    - time of Resp TX/RX
- *
- *                       <--TDLY->                   - POLL_TX_TO_RESP_RX_DLY_UUS (RDLY-RLEN)
- *                               <-RLEN->            - RESP_RX_TIMEOUT_UUS   (length of response frame)
- *                    <----RDLY------>               - POLL_RX_TO_RESP_TX_DLY_UUS (depends on how quickly responder can turn around and reply)
- *
- *
- * 2. The sum of the values is the TX to RX antenna delay, experimentally determined by a calibration process. Here we use a hard coded typical value
- *    but, in a real application, each device should have its own antenna delay properly calibrated to get the best possible precision when performing
- *    range measurements.
- * 3. The frames used here are Decawave specific ranging frames, complying with the IEEE 802.15.4 standard data frame encoding. The frames are the
- *    following:
- *     - a poll message sent by the initiator to trigger the ranging exchange.
- *     - a response message sent by the responder to complete the exchange and provide all information needed by the initiator to compute the
- *       time-of-flight (distance) estimate.
- *    The first 10 bytes of those frame are common and are composed of the following fields:
- *     - byte 0/1: frame control (0x8841 to indicate a data frame using 16-bit addressing).
- *     - byte 2: sequence number, incremented for each new frame.
- *     - byte 3/4: PAN ID (0xDECA).
- *     - byte 5/6: destination address, see NOTE 4 below.
- *     - byte 7/8: source address, see NOTE 4 below.
- *     - byte 9: function code (specific values to indicate which message it is in the ranging process).
- *    The remaining bytes are specific to each message as follows:
- *    Poll message:
- *     - no more data
- *    Response message:
- *     - byte 10 -> 13: poll message reception timestamp.
- *     - byte 14 -> 17: response message transmission timestamp.
- *    All messages end with a 2-byte checksum automatically set by DW IC.
- * 4. Source and destination addresses are hard coded constants in this example to keep it simple but for a real product every device should have a
- *    unique ID. Here, 16-bit addressing is used to keep the messages as short as possible but, in an actual application, this should be done only
- *    after an exchange of specific messages used to define those short addresses for each device participating to the ranging exchange.
- * 5. In a real application, for optimum performance within regulatory limits, it may be necessary to set TX pulse bandwidth and TX power, (using
- *    the dwt_configuretxrf API call) to per device calibrated values saved in the target system or the DW IC OTP memory.
- * 6. We use polled mode of operation here to keep the example as simple as possible but all status events can be used to generate interrupts. Please
- *    refer to DW IC User Manual for more details on "interrupts". It is also to be noted that STATUS register is 5 bytes long but, as the event we
- *    use are all in the first bytes of the register, we can use the simple dwt_read32bitreg() API call to access it instead of reading the whole 5
- *    bytes.
- * 7. As we want to send final TX timestamp in the final message, we have to compute it in advance instead of relying on the reading of DW IC
- *    register. Timestamps and delayed transmission time are both expressed in device time units so we just have to add the desired response delay to
- *    response RX timestamp to get final transmission time. The delayed transmission time resolution is 512 device time units which means that the
- *    lower 9 bits of the obtained value must be zeroed. This also allows to encode the 40-bit value in a 32-bit words by shifting the all-zero lower
- *    8 bits.
- * 8. In this operation, the high order byte of each 40-bit timestamps is discarded. This is acceptable as those time-stamps are not separated by
- *    more than 2**32 device time units (which is around 67 ms) which means that the calculation of the round-trip delays (needed in the
- *    time-of-flight computation) can be handled by a 32-bit subtraction.
- * 9. dwt_writetxdata() takes the full size of the message as a parameter but only copies (size - 2) bytes as the check-sum at the end of the frame is
- *    automatically appended by the DW IC. This means that our variable could be two bytes shorter without losing any data (but the sizeof would not
- *    work anymore then as we would still have to indicate the full length of the frame to dwt_writetxdata()).
- * 10. When running this example on the DW3000 platform with the POLL_RX_TO_RESP_TX_DLY response delay provided, the dwt_starttx() is always
- *     successful. However, in cases where the delay is too short (or something else interrupts the code flow), then the dwt_starttx() might be issued
- *     too late for the configured start time. The code below provides an example of how to handle this condition: In this case it abandons the
- *     ranging exchange and simply goes back to awaiting another poll message. If this error handling code was not here, a late dwt_starttx() would
- *     result in the code flow getting stuck waiting subsequent RX event that will will never come. The companion "initiator" example (ex_06a) should
- *     timeout from awaiting the "response" and proceed to send another poll in due course to initiate another ranging exchange.
- * 11. The user is referred to DecaRanging ARM application (distributed with EVK1000 product) for additional practical example of usage, and to the
- *     DW IC API Guide for more details on the DW IC driver functions.
- * 12. In this example, the DW IC is put into IDLE state after calling dwt_initialise(). This means that a fast SPI rate of up to 20 MHz can be used
- *     thereafter.
- * 13. Desired configuration by user may be different to the current programmed configuration. dwt_configure is called to set desired
- *     configuration.
- ****************************************************************************************************************************************************/
+
+/**
+  * @brief SPIx Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI_Init(SPI_HandleTypeDef  *spi_hn)
+{
+
+    /* SPI parameter configuration*/
+    spi_hn->Init.Mode = SPI_MODE_MASTER;
+    spi_hn->Init.Direction = SPI_DIRECTION_2LINES;
+    spi_hn->Init.DataSize = SPI_DATASIZE_8BIT;
+    spi_hn->Init.CLKPolarity = SPI_POLARITY_LOW;
+    spi_hn->Init.CLKPhase = SPI_PHASE_1EDGE;
+    spi_hn->Init.NSS = SPI_NSS_SOFT;
+    spi_hn->Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_32;
+    spi_hn->Init.FirstBit = SPI_FIRSTBIT_MSB;
+    spi_hn->Init.TIMode = SPI_TIMODE_DISABLE;
+    spi_hn->Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+    spi_hn->Init.CRCPolynomial = 10;
+    if (HAL_SPI_Init(spi_hn) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+}
+
+/* TIM1 init function */
+static void MX_TIM1_Init(void)
+{
+
+    TIM_ClockConfigTypeDef sClockSourceConfig;
+    TIM_SlaveConfigTypeDef sSlaveConfig;
+    TIM_MasterConfigTypeDef sMasterConfig;
+    TIM_OC_InitTypeDef sConfigOC;
+    TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig;
+
+    htim1.Instance = TIM1;
+    htim1.Init.Prescaler = 0;
+    htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim1.Init.Period = 65535;
+    htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV2;
+    htim1.Init.RepetitionCounter = 0;
+    if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+
+    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+    if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+
+    if (HAL_TIM_OC_Init(&htim1) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+
+    sSlaveConfig.SlaveMode = TIM_SLAVEMODE_TRIGGER;
+    sSlaveConfig.InputTrigger = TIM_TS_ITR0;
+    if (HAL_TIM_SlaveConfigSynchronization(&htim1, &sSlaveConfig) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+
+    sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+    sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+
+    sConfigOC.OCMode = TIM_OCMODE_TIMING;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+    sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+    if (HAL_TIM_OC_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+
+    sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+    sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+    sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+    sBreakDeadTimeConfig.DeadTime = 0;
+    sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+    sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+    sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+    if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+
+    HAL_TIM_MspPostInit(&htim1);
+}
+
+/* USART3 init function */
+static void MX_USART3_UART_Init(void)
+{
+
+    huart3.Instance = USART3;
+    huart3.Init.BaudRate = 115200;
+    huart3.Init.WordLength = UART_WORDLENGTH_8B;
+    huart3.Init.StopBits = UART_STOPBITS_1;
+    huart3.Init.Parity = UART_PARITY_NONE;
+    huart3.Init.Mode = UART_MODE_TX_RX;
+    huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart3.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart3) != HAL_OK)
+    {
+        _Error_Handler(__FILE__, __LINE__);
+    }
+}
+
+/**
+ * Enable DMA controller clock
+ */
+static void MX_DMA_Init(void)
+{
+    /* DMA controller clock enable */
+    __HAL_RCC_DMA1_CLK_ENABLE();
+}
+
+/** Configure pins as
+ * Analog
+ * Input
+ * Output
+ * EVENT_OUT
+ * EXTI
+ */
+static void MX_GPIO_Init(void)
+{
+
+    GPIO_InitTypeDef GPIO_InitStruct;
+
+    /* GPIO Ports Clock Enable */
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_GPIOH_CLK_ENABLE();
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOF_CLK_ENABLE();
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOG_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(DW_RESET_GPIO_Port, DW_RESET_Pin, GPIO_PIN_SET);  //reset should be initialised as SET
+
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(GPIOB, LD3_Pin | LD2_Pin, GPIO_PIN_RESET);
+
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(DW_NSS_GPIO_Port, DW_NSS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(DW_NSS1_WAKEUP_GPIO_Port, DW_NSS1_WAKEUP_Pin, GPIO_PIN_RESET);
+
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(USB_PowerSwitchOn_GPIO_Port, USB_PowerSwitchOn_Pin, GPIO_PIN_RESET);
+
+    /*Configure GPIO pin Output Level */
+    HAL_GPIO_WritePin(DW_MEAS_TIME_GPIO_Port, DW_MEAS_TIME_Pin, GPIO_PIN_RESET);
+
+    /*Configure GPIO pin : USER_Btn_Pin */
+    GPIO_InitStruct.Pin = USER_Btn_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(USER_Btn_GPIO_Port, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : DW_IRQn_Pin */
+    GPIO_InitStruct.Pin = DW_IRQn_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(DW_IRQn_GPIO_Port, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : DW_RESET_Pin */
+    GPIO_InitStruct.Pin = DW_RESET_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    HAL_GPIO_Init(DW_RESET_GPIO_Port, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : DW_IRQ2_Pin */
+    GPIO_InitStruct.Pin = DW_IRQ2_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    HAL_GPIO_Init(DW_IRQ2_GPIO_Port, &GPIO_InitStruct);
+
+    /*Configure GPIO pins : LD3_Pin LD2_Pin */
+    GPIO_InitStruct.Pin = LD3_Pin|LD2_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : DW_NSS_Pin */
+    GPIO_InitStruct.Pin = DW_NSS_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    HAL_GPIO_Init(DW_NSS_GPIO_Port, &GPIO_InitStruct);
+
+
+    /*Configure GPIO pin : DW_WAKEUP_Pin */
+    GPIO_InitStruct.Pin = DW_NSS1_WAKEUP_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    HAL_GPIO_Init(DW_NSS1_WAKEUP_GPIO_Port, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : USB_PowerSwitchOn_Pin */
+    GPIO_InitStruct.Pin = USB_PowerSwitchOn_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(USB_PowerSwitchOn_GPIO_Port, &GPIO_InitStruct);
+
+    /*Configure GPIO pin : USB_OverCurrent_Pin */
+    GPIO_InitStruct.Pin = USB_OverCurrent_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(USB_OverCurrent_GPIO_Port, &GPIO_InitStruct);
+
+    /* This pin is used for time measuring. Connect this pin to scope and change it from low-high-low to measure time */
+    /*Configure GPIO pin : DW_MEAS_TIME_Pin */
+    GPIO_InitStruct.Pin = DW_MEAS_TIME_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    HAL_GPIO_Init(DW_MEAS_TIME_GPIO_Port, &GPIO_InitStruct);
+}
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
+
+/**
+ * @brief  Period elapsed callback in non blocking mode
+ * @note   This function is called  when TIM6 interrupt took place, inside
+ * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+ * a global variable "uwTick" used as application time base.
+ * @param  htim : TIM handle
+ * @retval None
+ */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    /* USER CODE BEGIN Callback 0 */
+
+    /* USER CODE END Callback 0 */
+    if (htim->Instance == TIM6)
+    {
+        HAL_IncTick();
+    }
+    /* USER CODE BEGIN Callback 1 */
+
+    /* USER CODE END Callback 1 */
+}
+
+/**
+ * @brief  This function is executed in case of error occurrence.
+ * @param  file: The file name as string.
+ * @param  line: The line in file as a number.
+ * @retval None
+ */
+void _Error_Handler(char *file, int line)
+{
+	(void)file;
+	(void)line;
+    /* USER CODE BEGIN Error_Handler_Debug */
+    /* User can add his own implementation to report the HAL error return state */
+    while (1) { }
+    /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef USE_FULL_ASSERT
+/**
+ * @brief  Reports the name of the source file and the source line number
+ *         where the assert_param error has occurred.
+ * @param  file: pointer to the source file name
+ * @param  line: assert_param error line source number
+ * @retval None
+ */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+    /* USER CODE BEGIN 6 */
+    /* User can add his own implementation to report the file name and line number,
+       tex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+    /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
+
+/**
+ * @}
+ */
+
+/**
+ * @}
+ */
+
+/************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
