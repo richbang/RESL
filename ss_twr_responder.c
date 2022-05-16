@@ -77,7 +77,28 @@ static uint8_t anchor3[16] = {'A','2',':',0,0,0,0,0,0,0,0,0,0,0,0, 10};
 */
 /* Hold copy of status register state here for reference so that it can be examined at a debug breakpoint. */
 static uint32_t status_reg = 0;
-
+float str_to_float(char *arr){
+    int i,j,flag;
+    float val;
+    char c;
+    i=0;
+    j=0;
+    val=0;
+    flag=0;
+    while ((c = *(arr+i))!='\0'){
+//      if ((c<'0')||(c>'9')) return 0;
+        if (c!='.'){
+            val =(val*10)+(c-'0');
+            if (flag == 1){
+                --j;
+            }
+        }
+        if (c=='.'){ if (flag == 1) return 0; flag=1;}
+        ++i;
+    }
+    val = val*pow(10,j);
+    return val;
+}
 typedef struct Anchor
 {
 	double x;
@@ -85,20 +106,21 @@ typedef struct Anchor
 	double distance;
 }Anchor;
 
-
-static double coor[2];
-static char Tag_dis[16]={0,};
+static char Tag_x[32]={0,};
+static char Tag_y[32]={0,};
 void trilaterate(Anchor A1, Anchor A2, Anchor A3)
 {
 	double A = 2*(A2.x - A1.x);
 	double B = 2*(A2.y - A2.y);
-	double C = (pow(A1.distance, 2.0) - pow(A2.distance, 2.0) - pow(A1.x, 2.0) + pow(A2.x, 2.0) - pow(A1.y, 2.0) + pow(A2.y, 2.0));
+	double C = ((pow(A1.distance, 2.0)) - (pow(A2.distance, 2.0)) - (pow(A1.x, 2.0)) + (pow(A2.x, 2.0)) - (pow(A1.y, 2.0)) + (pow(A2.y, 2.0)));
 	double D = 2*(A3.x - A2.x);
 	double E = 2*(A3.y = A2.y);
 	double F = (pow(A2.distance, 2.0) - pow(A3.distance, 2.0) - pow(A2.x, 2.0) + pow(A3.x, 2.0) - pow(A2.y, 2.0) + pow(A3.y, 2.0));
 
-	coor[0] = ( (F * B) - (E * C)) / ((B * D) - (E * A));
-	coor[1] = ( (F * A) - (D * C)) / ((A * E) - (D * B));
+	double x = ( (F * B) - (E * C)) / ((B * D) - (E * A));
+	double y = ( (F * A) - (D * C)) / ((A * E) - (D * B));
+	snprintf(Tag_x, 32, "%lf", x);
+	snprintf(Tag_y, 32, "%lf", y);
 }
 
 /* Delay between frames, in UWB microseconds. See NOTE 1 below. */
@@ -169,12 +191,15 @@ int ss_twr_responder(void)
     Anchor A1,A2,A3;
     A1.x=0;
     A1.y=0;
+    A1.distance = 0;
     A2.x=-1;
     A2.y=0;
+    A2.distance = 0;
     A3.x=0;
     A3.y=1;
+    A3.distance = 0;
     /* Loop forever responding to ranging requests. */
-    struct Anchor *Anchor_identifier;
+    Anchor *Anchor_identifier;
     while (1)
     {
         /* Activate reception immediately. */
@@ -267,15 +292,20 @@ int ss_twr_responder(void)
                             else if(buff[0]=='9'){
                             	Anchor_identifier = &A3;
                             }
-							Anchor_identifier->distance = atoi(&buff[1]);
+                            buff[14] = '\0';
+                            buff[15] = '\0';
+                            double buf=str_to_float(&buff[1]);
+
+							Anchor_identifier->distance = buf;
                         }
                         if((A1.distance>0) && (A2.distance>0) && (A3.distance>0))
                         {
                         	trilaterate(A1,A2,A3);
-                        	sprintf(Tag_dis, "%lf", coor[0], coor[1]);
-							test_run_info((unsigned char*)Tag_dis);
+							test_run_info((unsigned char*)Tag_x);
+							test_run_info((unsigned char*)Tag_y);
                         }
                     }
+                    Sleep(500);
                     /******************************************************************************************************/
                 }
             }
@@ -285,7 +315,6 @@ int ss_twr_responder(void)
             /* Clear RX error events in the DW IC status register. */
             dwt_writesysstatuslo(SYS_STATUS_ALL_RX_ERR);
         }
-        //Sleep(2000);
     }
 }
 #endif
