@@ -328,7 +328,7 @@ int ss_twr_responder(void)
                             Anchor_identifier = A1;
                             buff[14] = '\0'; //Checksum 값 초기화
                             buff[15] = '\0'; //Checksum 값 초기화
-                            float buf=str_to_float(&buff[4]);
+                            float buf=str_to_float(buff);
 
                 			Anchor_identifier->distance = buf;
                         }
@@ -384,7 +384,7 @@ int ss_twr_responder(void)
                             Anchor_identifier = A2;
                             buff[14] = '\0'; //Checksum 값 초기화
                             buff[15] = '\0'; //Checksum 값 초기화
-                            float buf=str_to_float(&buff[4]);
+                            float buf=str_to_float(buff);
 
                 			Anchor_identifier->distance = buf;
                         }
@@ -440,7 +440,7 @@ int ss_twr_responder(void)
                             Anchor_identifier = A3;
                             buff[14] = '\0'; //Checksum 값 초기화
                             buff[15] = '\0'; //Checksum 값 초기화
-                            float buf=str_to_float(&buff[4]);
+                            float buf=str_to_float(buff);
 
                 			Anchor_identifier->distance = buf;
                         }
