@@ -241,16 +241,14 @@ int ss_twr_initiator(void)
 						dwt_writetxfctrl(fLength+2,0,0); // set the frame control register
 						dwt_starttx(DWT_START_TX_IMMEDIATE); // send the frame
 						*/
-                    distance_message[0] = '7';
-                    sprintf((char*)&distance_message[1], "%3.2f", distance); //방법 1 : distance_message 배열을 만들어서 distance값을 copy하여 tx에 싣기.
+                    sprintf((char*)&distance_message, "%3.2f", distance); //방법 1 : distance_message 배열을 만들어서 distance값을 copy하여 tx에 싣기.
+
                     //uint8_t* p_distance = (uint8_t*)&distance;
                     //dwt_writetxdata(sizeof(distance), p_distance, 0); /* 방법2 : uint8_t 타입의 포인터를 만들어 distance를 uint8_t로 타입 캐스팅하여 초기화 하기. */
+
                     dwt_writetxdata(sizeof(distance_message), distance_message, 0);
                     dwt_writetxfctrl(sizeof(distance_message), 0, 0);          /* 오프셋=0 (버퍼에서 위치 이동 안함), ranging -> 레인징 프레임이 아니라서 0 */
                     dwt_starttx(DWT_START_TX_IMMEDIATE);
-
-                    //snprintf(&dist_str[1], sizeof(dist_str), "DIST: %3.2f m", distance);
-                    //test_run_info((unsigned char *)dist_str);
                 }
             }
         }
