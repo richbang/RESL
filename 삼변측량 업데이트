@@ -1,0 +1,51 @@
+float norm (Anchor p) // get the norm of a vector
+{
+
+    return pow(pow(p.x,2)+pow(p.y,2),.5);
+
+}
+void trilateration(Anchor point1, Anchor point2, Anchor point3)
+{
+	Anchor resultPose;
+	//Norm은 벡터의 길이 혹은 크기를 측정하는 방법
+    //unit vector in a direction from point1 to point 2
+    double p2p1Distance = pow(pow(point2.x-point1.x,2) + pow(point2.y-   point1.y,2),0.5);
+    Anchor ex = {(point2.x-point1.x)/p2p1Distance, (point2.y-point1.y)/p2p1Distance};
+    Anchor aux = {point3.x-point1.x,point3.y-point1.y};
+
+    //Norm이 측정한 벡터의 크기는 원점에서 벡터 좌표까지의 거리 혹은 Magnitude
+    //signed magnitude of the x component
+    double i = ex.x * aux.x + ex.y * aux.y;
+
+    //the unit vector in the y direction.
+    Anchor aux2 = { point3.x-point1.x-i*ex.x, point3.y-point1.y-i*ex.y};
+    Anchor ey = { aux2.x / norm (aux2), aux2.y / norm (aux2) };
+
+    //the signed magnitude of the y component
+    double j = ey.x * aux.x + ey.y * aux.y;
+
+    //coordinates
+    double x = (pow(point1.distance,2) - pow(point2.distance,2) + pow(p2p1Distance,2))/ (2 * p2p1Distance);
+    double y = (pow(point1.distance,2) - pow(point3.distance,2) + pow(i,2) + pow(j,2))/(2*j) - i*x/j;
+
+    //result coordinates
+    double finalX = point1.x+ x*ex.x + y*ey.x;
+    double finalY = point1.y+ x*ex.y + y*ey.y;
+
+	sprintf(&arr1[2], "%f\n",finalX);
+	sprintf(&arr2[2], "%f\n",finalY);
+
+	test_run_info(arr1);
+	Sleep(100);
+	test_run_info(arr2);
+}
+
+void tril_do()
+{
+    /********************************************************************************************/
+	if((A1.distance>0) && (A2.distance>0) && (A3.distance>0))
+	{
+		//trilaterate(A1,A2,A3);
+		trilateration(A1,A2,A3);
+	}
+}
